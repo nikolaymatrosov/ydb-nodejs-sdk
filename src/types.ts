@@ -15,10 +15,27 @@ import PrimitiveTypeId = Ydb.Type.PrimitiveTypeId;
 
 
 export const typeMetadataKey = Symbol('type');
+export const columnNameMetadataKey = Symbol('columnName');
+export const columnNameDictMetadataKey = Symbol('columnNameDict');
 
-export function declareType(type: IType) {
-    return Reflect.metadata(typeMetadataKey, type);
+export interface ColumnOptions {
+    columnName: string;
 }
+
+export function declareType(type: IType, options: ColumnOptions | null = null) {
+    return (target: any, propertyKey: any) => {
+        let columnName = options?.columnName ?? null;
+        if (columnName === null) {
+            columnName = _.snakeCase(propertyKey);
+        }
+        const namesMap = Reflect.getMetadata(columnNameDictMetadataKey, target) || {};
+        namesMap[columnName] = propertyKey;
+        Reflect.defineMetadata(columnNameDictMetadataKey, namesMap, target);
+        Reflect.defineMetadata(columnNameMetadataKey, columnName, target, propertyKey)
+        Reflect.defineMetadata(typeMetadataKey, type, target, propertyKey)
+    }
+}
+
 
 const primitiveTypeToValue: Record<number, string> = {
     [Type.PrimitiveTypeId.BOOL]: 'boolValue',
@@ -47,12 +64,12 @@ const primitiveTypeToValue: Record<number, string> = {
     [Type.PrimitiveTypeId.TZ_TIMESTAMP]: 'textValue',
 };
 
-const parseLong = (input: string|number): Long|number => {
-   const long = typeof input === 'string' ? Long.fromString(input) : Long.fromNumber(input);
-   return long.high ? long : long.low;
+const parseLong = (input: string | number): Long | number => {
+    const long = typeof input === 'string' ? Long.fromString(input) : Long.fromNumber(input);
+    return long.high ? long : long.low;
 };
 
-const valueToNativeConverters: Record<string, (input: string|number) => any> = {
+const valueToNativeConverters: Record<string, (input: string | number) => any> = {
     'boolValue': (input) => Boolean(input),
     'int32Value': (input) => Number(input),
     'uint32Value': (input) => Number(input),
@@ -64,6 +81,7 @@ const valueToNativeConverters: Record<string, (input: string|number) => any> = {
     'textValue': (input) => input,
     'nullFlagValue': () => null,
 };
+
 function convertPrimitiveValueToNative(type: IType, value: IValue) {
     let label, input;
     for ([label, input] of Object.entries(value)) {
@@ -202,7 +220,7 @@ function typeToValue(type: IType | null | undefined, value: any): IValue {
         } else if (type.variantType.structItems) {
             const members = type.variantType.structItems.members as IStructMember[];
             return {
-                items: _.map(value, (item, index: number)=> {
+                items: _.map(value, (item, index: number) => {
                     if (item) {
                         variantIndex = index;
                         const type = members[index].type;
@@ -235,6 +253,25 @@ export class TypedData {
         return typeMeta;
     }
 
+    getColumnName(propertyKey: string): string {
+        const columnNameMeta = Reflect.getMetadata(columnNameMetadataKey, this, propertyKey);
+        if (!columnNameMeta) {
+            throw new Error(`Property ${propertyKey} should be decorated with @declareType!`);
+        }
+        return columnNameMeta;
+    }
+
+    static getPropertyKey(columnName: string): string {
+        const columnDict = Reflect.getMetadata(columnNameDictMetadataKey, this);
+        if (!columnDict) {
+            throw new Error(`Properties mapped to DB columns should be decorated with @declareType!`);
+        }
+        if (!columnDict[columnName]) {
+            throw new Error(`Column '${columnName}' does not map to any property in ${this.constructor.name}`);
+        }
+        return columnDict[columnName];
+    }
+
     getValue(propertyKey: string): IValue {
         const type = this.getType(propertyKey);
         return typeToValue(type, this[propertyKey]);
@@ -257,7 +294,7 @@ export class TypedData {
         return {
             structType: {
                 members: _.map(this.typedProperties, (propertyKey) => ({
-                    name: _.snakeCase(propertyKey),
+                    name: this.getColumnName(propertyKey),
                     type: this.getType(propertyKey)
                 }))
             }
@@ -281,7 +318,7 @@ export class TypedData {
             const obj = _.reduce(row.items, (acc: Record<string, any>, value, index) => {
                 const column = columns[index] as IColumn;
                 if (column.name && column.type) {
-                    acc[_.camelCase(column.name)] = convertPrimitiveValueToNative(column.type, value);
+                    acc[TypedData.getPropertyKey(column.name)] = convertPrimitiveValueToNative(column.type, value);
                 }
                 return acc;
             }, {});
